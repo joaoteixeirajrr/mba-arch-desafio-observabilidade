@@ -1,3 +1,4 @@
+import { SpanStatusCode } from '@opentelemetry/api';
 import { Router } from 'express';
 import type Redis from 'ioredis';
 import {
@@ -11,6 +12,8 @@ import {
 import { publicarPedido } from '../fila/fila';
 import { log } from '../telemetria/log';
 import { TIPO_DE_CONTEUDO, coletar } from '../telemetria/metricas';
+import { pedidosCriadosTotal } from '../telemetria/metricas-negocio';
+import { tracer } from '../telemetria/tracer';
 
 export function criarRotas(redis: Redis): Router {
   const rotas = Router();
@@ -56,26 +59,54 @@ export function criarRotas(redis: Redis): Router {
       return;
     }
 
-    const produtos = await buscarProdutosPorIds(itens.map((item) => item.produto_id));
-    const precoPorProduto = new Map(produtos.map((produto) => [produto.id, produto.preco]));
+    // Span de negocio pedido.criar: cobre a criacao do pedido e a publicacao
+    // na fila. startActiveSpan deixa o span ativo para os spans-filho (consulta
+    // e publicacao) e para as linhas de log escritas aqui dentro.
+    await tracer.startActiveSpan('pedido.criar', async (span) => {
+      try {
+        span.setAttribute('cliente.id', clienteId);
+        span.setAttribute('pedido.itens', itens.length);
 
-    const faltando = itens.filter((item) => !precoPorProduto.has(item.produto_id));
-    if (faltando.length > 0) {
-      resposta.status(400).json({ erro: 'produto inexistente no pedido' });
-      return;
-    }
+        const produtos = await buscarProdutosPorIds(itens.map((item) => item.produto_id));
+        const precoPorProduto = new Map(produtos.map((produto) => [produto.id, produto.preco]));
 
-    const pedido = await criarPedido(clienteId, itens, precoPorProduto);
+        const faltando = itens.filter((item) => !precoPorProduto.has(item.produto_id));
+        if (faltando.length > 0) {
+          resposta.status(400).json({ erro: 'produto inexistente no pedido' });
+          return;
+        }
 
-    await publicarPedido(redis, {
-      pedido_id: pedido.id,
-      cliente_id: clienteId,
-      valor_total: pedido.valor_total,
+        const pedido = await criarPedido(clienteId, itens, precoPorProduto);
+
+        span.setAttribute('pedido.id', pedido.id);
+        span.setAttribute('pedido.valor_total', pedido.valor_total);
+
+        await publicarPedido(redis, {
+          pedido_id: pedido.id,
+          cliente_id: clienteId,
+          valor_total: pedido.valor_total,
+        });
+
+        pedidosCriadosTotal.inc();
+
+        log.info('pedido ' + pedido.id + ' criado para ' + clienteId, {
+          pedido_id: pedido.id,
+        });
+
+        resposta.status(202).json({ pedido_id: pedido.id, status: 'pendente' });
+      } catch (erro) {
+        // Registra a excecao no span, marca status de erro e emite log error.
+        // Relanca para preservar o comportamento original (Express 4 nao
+        // captura excecao de handler async): instrumentar sem mudar o fluxo.
+        const motivo = erro as Error;
+        span.recordException(motivo);
+        span.setStatus({ code: SpanStatusCode.ERROR, message: motivo.message });
+        log.error('falha ao criar pedido: ' + motivo.message);
+        throw motivo;
+      } finally {
+        span.end();
+      }
     });
-
-    log.info('pedido ' + pedido.id + ' criado para ' + clienteId);
-
-    resposta.status(202).json({ pedido_id: pedido.id, status: 'pendente' });
   });
 
   rotas.get('/pedidos/:id', async (requisicao, resposta) => {

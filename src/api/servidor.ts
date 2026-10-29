@@ -3,12 +3,15 @@ import { esperarBanco, fecharPool } from '../db/pool';
 import { migrar } from '../db/migracao';
 import { criarConexaoRedis } from '../fila/fila';
 import { log } from '../telemetria/log';
+import { inicializarMetricasDeNegocio } from '../telemetria/metricas-negocio';
 import { medirRequisicoes } from './metricas-http';
 import { criarRotas } from './rotas';
 
 const porta = Number(process.env.API_PORT ?? process.env.PORT ?? 8080);
 
 async function iniciar(): Promise<void> {
+  inicializarMetricasDeNegocio();
+
   await esperarBanco();
   await migrar();
 

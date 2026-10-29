@@ -1,10 +1,20 @@
+import { ROOT_CONTEXT, SpanStatusCode, context } from '@opentelemetry/api';
 import http from 'node:http';
 import { atualizarStatusPedido } from '../db/consultas';
 import { esperarBanco, fecharPool } from '../db/pool';
 import { migrar } from '../db/migracao';
-import { consumirPedido, criarConexaoRedis } from '../fila/fila';
+import {
+  consumirPedido,
+  criarConexaoRedis,
+  extrairContextoDaMensagem,
+} from '../fila/fila';
 import { log } from '../telemetria/log';
 import { TIPO_DE_CONTEUDO, coletar } from '../telemetria/metricas';
+import {
+  inicializarMetricasDeNegocio,
+  pedidosConfirmadosTotal,
+} from '../telemetria/metricas-negocio';
+import { tracer } from '../telemetria/tracer';
 import { decidirStatusDoPedido } from './conciliacao';
 
 const porta = Number(process.env.WORKER_PORT ?? process.env.PORT ?? 8081);
@@ -41,15 +51,49 @@ async function processarMensagem(mensagem: Record<string, unknown>): Promise<voi
   const clienteId = String(mensagem.cliente_id);
   const valorTotal = Number(mensagem.valor_total);
 
-  log.info('mensagem do pedido ' + pedidoId + ' recebida da fila');
+  // Extrai o contexto de trace da mensagem a partir de um contexto raiz
+  // (ROOT_CONTEXT), e nao do contexto ativo do worker, para que o span
+  // pedido.processar continue o trace da API em vez de nascer solto.
+  const contextoDoTrace = extrairContextoDaMensagem(mensagem, ROOT_CONTEXT);
 
-  const status = await decidirStatusDoPedido(clienteId, valorTotal);
-  await atualizarStatusPedido(pedidoId, status);
+  await context.with(contextoDoTrace, async () => {
+    await tracer.startActiveSpan('pedido.processar', async (span) => {
+      try {
+        span.setAttribute('pedido.id', pedidoId);
+        span.setAttribute('cliente.id', clienteId);
+        span.setAttribute('pedido.valor_total', valorTotal);
 
-  log.info('pedido ' + pedidoId + ' ficou ' + status);
+        log.info('mensagem do pedido ' + pedidoId + ' recebida da fila', {
+          pedido_id: pedidoId,
+        });
+
+        const status = await decidirStatusDoPedido(clienteId, valorTotal);
+        await atualizarStatusPedido(pedidoId, status);
+
+        span.setAttribute('pedido.status', status);
+        if (status === 'confirmado') {
+          pedidosConfirmadosTotal.inc();
+        }
+
+        log.info('pedido ' + pedidoId + ' ficou ' + status, { pedido_id: pedidoId });
+      } catch (erro) {
+        const motivo = erro as Error;
+        span.recordException(motivo);
+        span.setStatus({ code: SpanStatusCode.ERROR, message: motivo.message });
+        log.error('falha ao processar pedido ' + pedidoId + ': ' + motivo.message, {
+          pedido_id: pedidoId,
+        });
+        throw motivo;
+      } finally {
+        span.end();
+      }
+    });
+  });
 }
 
 async function iniciar(): Promise<void> {
+  inicializarMetricasDeNegocio();
+
   await esperarBanco();
   await migrar();
 
