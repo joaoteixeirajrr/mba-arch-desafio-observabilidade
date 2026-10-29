@@ -18,8 +18,15 @@ export function medirRequisicoes(
   const encerrarMedicao = duracaoDasRequisicoes.startTimer();
 
   resposta.on('finish', () => {
+    // Usa o template da rota (ex.: /produtos/:id) e nunca o caminho concreto
+    // (ex.: /produtos/42). Caminho concreto gera uma serie nova por id e
+    // explode a cardinalidade do Prometheus.
+    const template =
+      requisicao.route?.path ?? requisicao.baseUrl + (requisicao.route?.path ?? '');
+    const rota = template || (requisicao.path === '/' ? '/' : 'desconhecida');
+
     encerrarMedicao({
-      route: requisicao.path,
+      route: rota,
       method: requisicao.method,
       status: String(resposta.statusCode),
     });
