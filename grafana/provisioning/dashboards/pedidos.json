@@ -1,11 +1,11 @@
 {
   "uid": "pedidos",
   "title": "Pedidos",
-  "description": "Painel inicial do desafio. Acrescente os seus paineis copiando o bloco de panels e trocando a query, o titulo e o gridPos.",
+  "description": "Saude do fluxo de pedidos: erro, latencia e dinheiro entrando.",
   "tags": ["desafio", "observabilidade"],
   "timezone": "browser",
   "schemaVersion": 39,
-  "version": 1,
+  "version": 2,
   "refresh": "10s",
   "editable": true,
   "time": { "from": "now-30m", "to": "now" },
@@ -13,16 +13,16 @@
     {
       "id": 1,
       "type": "timeseries",
-      "title": "Quanto trafego a API esta recebendo? Requisicoes por segundo, por rota",
-      "description": "Taxa de requisicoes HTTP derivada do contador do histograma http_request_duration_seconds.",
+      "title": "O sistema esta com erro? Cobrancas por resultado (req/s)",
+      "description": "Taxa de cobrancas processadas por resultado. A serie 'falha' subindo e o sinal de que a cobranca esta estourando sem ninguem ver.",
       "gridPos": { "h": 9, "w": 12, "x": 0, "y": 0 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
         {
           "refId": "A",
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "sum by (route) (rate(http_request_duration_seconds_count[1m]))",
-          "legendFormat": "{{route}}",
+          "expr": "sum by (resultado) (rate(cobrancas_processadas_total[1m]))",
+          "legendFormat": "{{resultado}}",
           "range": true
         }
       ],
@@ -30,7 +30,92 @@
         "defaults": {
           "unit": "reqps",
           "min": 0,
+          "decimals": 3,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 15,
+            "showPoints": "never",
+            "spanNulls": false
+          },
+          "color": { "mode": "palette-classic" }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "falha" },
+            "properties": [
+              { "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "O sistema esta com erro? Proporcao de falha na cobranca (SLI)",
+      "description": "Fracao das cobrancas que falharam na janela. E o complemento do SLI de sucesso e a base do alerta FalhaEmCobrancas.",
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum(rate(cobrancas_processadas_total{resultado=\"falha\"}[5m])) / clamp_min(sum(rate(cobrancas_processadas_total[5m])), 0.0001)",
+          "legendFormat": "falha",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
           "decimals": 2,
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 0.02 },
+              { "color": "red", "value": 0.05 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
+      }
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "O sistema esta lento? Latencia HTTP p95 por rota",
+      "description": "Percentil 95 da duracao das requisicoes HTTP, por rota (template, nunca caminho concreto).",
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 9 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "histogram_quantile(0.95, sum by (le, route) (rate(http_request_duration_seconds_bucket[5m])))",
+          "legendFormat": "{{route}}",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0,
+          "decimals": 3,
           "custom": {
             "drawStyle": "line",
             "lineWidth": 2,
@@ -41,6 +126,63 @@
           "color": { "mode": "palette-classic" }
         },
         "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      }
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "O dinheiro esta entrando? Pedidos confirmados x cobrancas aprovadas (req/s)",
+      "description": "Taxa de pedidos confirmados contra a taxa de cobrancas aprovadas. Quando a linha de confirmados fica acima da de aprovadas, existe pedido confirmado sem dinheiro entrando: e a queixa do financeiro aparecendo.",
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 9 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum(rate(pedidos_confirmados_total[1m]))",
+          "legendFormat": "pedidos confirmados",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum(rate(cobrancas_processadas_total{resultado=\"aprovada\"}[1m]))",
+          "legendFormat": "cobrancas aprovadas",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "min": 0,
+          "decimals": 3,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false
+          },
+          "color": { "mode": "palette-classic" }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "pedidos confirmados" },
+            "properties": [
+              { "id": "color", "value": { "mode": "fixed", "fixedColor": "blue" } }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "cobrancas aprovadas" },
+            "properties": [
+              { "id": "color", "value": { "mode": "fixed", "fixedColor": "green" } }
+            ]
+          }
+        ]
       },
       "options": {
         "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
