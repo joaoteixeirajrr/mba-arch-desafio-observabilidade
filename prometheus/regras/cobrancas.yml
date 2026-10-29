@@ -1,0 +1,29 @@
+groups:
+  - name: cobrancas
+    rules:
+      # SLI de saude da cobranca: proporcao de cobrancas processadas que NAO
+      # falharam (sucesso = aprovada ou recusada; falha = excecao no gateway,
+      # a cobranca nunca completou).
+      #
+      #   SLI_sucesso = 1 - ( rate(falha) / rate(total) )
+      #
+      # SLO: 99% de sucesso numa janela de 30 dias.
+      # Error budget = 1 - 0.99 = 1% das cobrancas podem falhar.
+      #
+      # Derivacao do limiar: o SLO permite ate 1% de falha. O alerta dispara
+      # quando a proporcao de falha de curto prazo (janela de 5m) ultrapassa
+      # esse teto de 1% (0.01), ou seja, quando o servico passa a queimar o
+      # error budget mais rapido do que o SLO tolera. O numero 0.01 sai direto
+      # do SLO (100% - 99%), nao de um chute.
+      - alert: FalhaEmCobrancas
+        expr: |
+          sum(rate(cobrancas_processadas_total{resultado="falha"}[5m]))
+            /
+          clamp_min(sum(rate(cobrancas_processadas_total[5m])), 0.0001)
+            > 0.01
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Falha em cobrancas acima do error budget do SLO"
+          description: "A proporcao de cobrancas com resultado=falha nos ultimos 5m ultrapassou 1% (error budget do SLO de 99% de sucesso em 30d). Pedidos podem estar sendo confirmados sem cobranca efetiva."
